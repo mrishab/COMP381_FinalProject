@@ -1,0 +1,341 @@
+{
+  "imputation_benchmark": {
+    "Mode (Baseline)": {
+      "accuracy": 0.7577681256264618,
+      "f1_macro": 0.28739783311157574,
+      "description": "Fills missing values with most frequent category"
+    },
+    "KNN (k=5)": {
+      "accuracy": 0.742064817908453,
+      "f1_macro": 0.4258267139713367,
+      "description": "Predicts category using 5 nearest neighbors in feature space"
+    },
+    "LDA Imputation": {
+      "accuracy": 0.7701303040427665,
+      "f1_macro": 0.36928967777158506,
+      "description": "Projected linear discriminant classification for missing labels"
+    },
+    "Hot Deck": {
+      "accuracy": 0.769796191112596,
+      "f1_macro": 0.5920221246427387,
+      "description": "Matches missing value to donor record in same city and price cohort"
+    },
+    "Linear/Spatial Interpolation": {
+      "accuracy": 0.7063147343802205,
+      "f1_macro": 0.48882482350384304,
+      "description": "Spatial coordinate ordering with nearest gradient interpolation"
+    },
+    "LOCF (Last Observation Carried Forward)": {
+      "accuracy": 0.6625459405278984,
+      "f1_macro": 0.41325245229109764,
+      "description": "Sequential dataset carry-forward imputation"
+    }
+  },
+  "pretraining_benchmark": {
+    "1. Baseline (Raw + StandardScale)": {
+      "samples": 44896,
+      "scaler": "standard",
+      "log_target": false,
+      "r2": 0.03630397843748234,
+      "mae": 514939.9935327255,
+      "rmse": 1580960.3142752452
+    },
+    "2. IQR Removal (m=3.0 + StandardScale)": {
+      "samples": 42973,
+      "scaler": "standard",
+      "log_target": false,
+      "r2": 0.5968457566039622,
+      "mae": 299541.23953719524,
+      "rmse": 434138.005682638
+    },
+    "3. IQR Removal (m=1.5 + StandardScale)": {
+      "samples": 40222,
+      "scaler": "standard",
+      "log_target": false,
+      "r2": 0.594018737776121,
+      "mae": 233658.5425404071,
+      "rmse": 318284.3805403549
+    },
+    "4. Percentile Capping (1%-99% + RobustScale)": {
+      "samples": 44896,
+      "scaler": "robust",
+      "log_target": false,
+      "r2": 0.5903192850753374,
+      "mae": 426453.17828841816,
+      "rmse": 684856.1507026587
+    },
+    "5. Isolation Forest (c=0.02 + RobustScale)": {
+      "samples": 43998,
+      "scaler": "robust",
+      "log_target": false,
+      "r2": 0.5433049604636683,
+      "mae": 364985.1350921942,
+      "rmse": 572926.5345204768
+    },
+    "6. Capped (1%-99%) + Log(Price) + RobustScale": {
+      "samples": 44896,
+      "scaler": "robust",
+      "log_target": true,
+      "r2": 0.36081312412360544,
+      "mae": 395052.1403966643,
+      "rmse": 855441.9125405679
+    }
+  },
+  "feature_subsets": [
+    {
+      "Feature_Set": "full_model",
+      "Num_Features": 48,
+      "R2_Score": 0.6659498219648099,
+      "RMSE": 618418.4728181261
+    },
+    {
+      "Feature_Set": "baseline",
+      "Num_Features": 6,
+      "R2_Score": 0.5903743899127787,
+      "RMSE": 684810.0902528991
+    },
+    {
+      "Feature_Set": "interactions",
+      "Num_Features": 8,
+      "R2_Score": 0.4877567406777791,
+      "RMSE": 765798.8789545542
+    },
+    {
+      "Feature_Set": "polynomial",
+      "Num_Features": 3,
+      "R2_Score": 0.4603656999440232,
+      "RMSE": 786006.9268125851
+    },
+    {
+      "Feature_Set": "categorical",
+      "Num_Features": 18,
+      "R2_Score": 0.3360520327428903,
+      "RMSE": 871853.7160728654
+    },
+    {
+      "Feature_Set": "location",
+      "Num_Features": 8,
+      "R2_Score": 0.23592318292080194,
+      "RMSE": 935287.460228459
+    },
+    {
+      "Feature_Set": "amenities",
+      "Num_Features": 7,
+      "R2_Score": 0.1367511319289363,
+      "RMSE": 994133.2715074581
+    }
+  ],
+  "model_leaderboard": [
+    {
+      "Model": "6. Random Forest (n=100, max_depth=16)",
+      "R2_Score": 0.879,
+      "MAE": 182605.3,
+      "RMSE": 372120.1,
+      "Fit_Time_Sec": 10.68
+    },
+    {
+      "Model": "7. XGBoost Regressor (depth=6, lr=0.08)",
+      "R2_Score": 0.8783,
+      "MAE": 194364.8,
+      "RMSE": 373214.89,
+      "Fit_Time_Sec": 0.65
+    },
+    {
+      "Model": "5. KNN Regressor (k=7, distance)",
+      "R2_Score": 0.7147,
+      "MAE": 274896.66,
+      "RMSE": 571493.26,
+      "Fit_Time_Sec": 0.0
+    },
+    {
+      "Model": "8. Deep Neural Network (MLP 128x64)",
+      "R2_Score": 0.7126,
+      "MAE": 312376.81,
+      "RMSE": 573568.81,
+      "Fit_Time_Sec": 101.11
+    },
+    {
+      "Model": "10. LDA Price Bracket + Ridge",
+      "R2_Score": 0.6794,
+      "MAE": 345702.23,
+      "RMSE": 605821.96,
+      "Fit_Time_Sec": 0.6
+    },
+    {
+      "Model": "1. Linear Regression (OLS)",
+      "R2_Score": 0.666,
+      "MAE": 380684.83,
+      "RMSE": 618364.71,
+      "Fit_Time_Sec": 0.17
+    },
+    {
+      "Model": "3. Lasso Regression (alpha=0.01)",
+      "R2_Score": 0.6652,
+      "MAE": 381341.67,
+      "RMSE": 619118.36,
+      "Fit_Time_Sec": 5.53
+    },
+    {
+      "Model": "2. Ridge Regression (alpha=10.0)",
+      "R2_Score": 0.6639,
+      "MAE": 380818.07,
+      "RMSE": 620345.65,
+      "Fit_Time_Sec": 0.05
+    },
+    {
+      "Model": "4. ElasticNet (alpha=0.1, l1=0.5)",
+      "R2_Score": 0.6375,
+      "MAE": 384416.78,
+      "RMSE": 644184.13,
+      "Fit_Time_Sec": 2.74
+    },
+    {
+      "Model": "9. Isolation Forest + Ridge Pipeline",
+      "R2_Score": 0.5787,
+      "MAE": 381847.97,
+      "RMSE": 694490.16,
+      "Fit_Time_Sec": 0.5
+    }
+  ],
+  "hyperparameter_tuning": {
+    "Random Forest": [
+      {
+        "params": {
+          "max_depth": 8,
+          "n_estimators": 50
+        },
+        "r2": 0.8472,
+        "mae": 226291.99
+      },
+      {
+        "params": {
+          "max_depth": 10,
+          "n_estimators": 50
+        },
+        "r2": 0.8624,
+        "mae": 208635.96
+      },
+      {
+        "params": {
+          "max_depth": 14,
+          "n_estimators": 100
+        },
+        "r2": 0.8763,
+        "mae": 187664.36
+      },
+      {
+        "params": {
+          "max_depth": 18,
+          "n_estimators": 100
+        },
+        "r2": 0.8799,
+        "mae": 179454.29
+      }
+    ],
+    "XGBoost": [
+      {
+        "params": {
+          "max_depth": 4,
+          "learning_rate": 0.1,
+          "n_estimators": 100
+        },
+        "r2": 0.854,
+        "mae": 217576.69
+      },
+      {
+        "params": {
+          "max_depth": 6,
+          "learning_rate": 0.08,
+          "n_estimators": 150
+        },
+        "r2": 0.8783,
+        "mae": 194364.8
+      },
+      {
+        "params": {
+          "max_depth": 8,
+          "learning_rate": 0.05,
+          "n_estimators": 150
+        },
+        "r2": 0.8841,
+        "mae": 186878.94
+      }
+    ],
+    "Ridge Regression": [
+      {
+        "params": {
+          "alpha": 0.1
+        },
+        "r2": 0.666,
+        "mae": 380670.65
+      },
+      {
+        "params": {
+          "alpha": 1.0
+        },
+        "r2": 0.6659,
+        "mae": 380490.49
+      },
+      {
+        "params": {
+          "alpha": 10.0
+        },
+        "r2": 0.6639,
+        "mae": 380818.07
+      },
+      {
+        "params": {
+          "alpha": 50.0
+        },
+        "r2": 0.6592,
+        "mae": 381784.99
+      },
+      {
+        "params": {
+          "alpha": 100.0
+        },
+        "r2": 0.6563,
+        "mae": 382395.36
+      }
+    ],
+    "KNN Regressor": [
+      {
+        "params": {
+          "n_neighbors": 3,
+          "weights": "distance"
+        },
+        "r2": 0.6733,
+        "mae": 287497.97
+      },
+      {
+        "params": {
+          "n_neighbors": 5,
+          "weights": "distance"
+        },
+        "r2": 0.7067,
+        "mae": 276882.05
+      },
+      {
+        "params": {
+          "n_neighbors": 7,
+          "weights": "distance"
+        },
+        "r2": 0.7147,
+        "mae": 274896.66
+      },
+      {
+        "params": {
+          "n_neighbors": 10,
+          "weights": "uniform"
+        },
+        "r2": 0.7015,
+        "mae": 304153.03
+      }
+    ]
+  },
+  "browser_model_metrics": {
+    "random_forest_r2": 0.8616,
+    "random_forest_mae": 208835.96,
+    "ridge_r2": 0.6639
+  }
+}
