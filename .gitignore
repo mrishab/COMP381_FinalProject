@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+airflow_pipeline/data/
+airflow_pipeline/logs/
+cleaned_canada.csv

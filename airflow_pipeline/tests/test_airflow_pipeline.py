@@ -11,11 +11,18 @@ from dags.utils.flaresolverr_client import FlareSolverrClient
 from dags.utils.realtor_scraper import RealtorScraper, COVERED_REGIONS
 from dags.utils.bcassessment_scraper import BCAssessmentScraper
 from dags.utils.data_transformer import DataTransformer
-from dags.utils.db_storage import DBStorage
+from dags.utils.db_storage import DBStorage, ALL_COLUMNS
+from dags.real_estate_collector_dag import (
+    dag,
+    task_init_storage,
+    task_export_csv,
+    task_pipeline_summary,
+    task_collect_and_enrich_city,
+)
 
 
 class TestFlareSolverrClient:
-    """Tests for FlareSolverrClient rate limiter and exponential backoff."""
+    """Tests for FlareSolverrClient rate limiter, exponential backoff, and header handling."""
 
     def test_rate_limiter_enforces_delay(self):
         client = FlareSolverrClient(rate_limit_delay=0.1, jitter_range=0.0)
@@ -62,7 +69,6 @@ class TestFlareSolverrClient:
         mock_post.return_value = mock_resp
 
         client = FlareSolverrClient(flaresolverr_url="http://mock:8191/v1")
-        # Test form urlencoding
         res = client.request_via_flaresolverr(
             "https://api.realtor.ca/test",
             method="POST",
@@ -73,15 +79,62 @@ class TestFlareSolverrClient:
         called_payload = mock_post.call_args[1]["json"]
         assert "CultureId=1&PriceMin=500000" in called_payload["postData"] or "PriceMin=500000&CultureId=1" in called_payload["postData"]
 
+    @patch("requests.Session.post")
+    def test_flaresolverr_case_insensitive_content_type(self, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "status": "ok",
+            "solution": {"status": 200, "response": '{"ok": true}'}
+        }
+        mock_post.return_value = mock_resp
+
+        client = FlareSolverrClient(flaresolverr_url="http://mock:8191/v1")
+        res = client.request_via_flaresolverr(
+            "https://api.realtor.ca/test",
+            method="POST",
+            post_data={"query": "test"},
+            headers={"content-type": "application/json"}
+        )
+        assert res["status_code"] == 200
+        called_payload = mock_post.call_args[1]["json"]
+        assert called_payload["postData"] == '{"query": "test"}'
+
+    @patch("requests.Session.get")
+    def test_flaresolverr_backoff_on_503(self, mock_get):
+        mock_resp_503 = MagicMock()
+        mock_resp_503.status_code = 503
+        mock_resp_503.text = "Service Unavailable"
+        mock_resp_503.headers = {}
+
+        mock_resp_ok = MagicMock()
+        mock_resp_ok.status_code = 200
+        mock_resp_ok.text = '{"success": true}'
+        mock_resp_ok.cookies = []
+        mock_resp_ok.headers = {}
+        mock_resp_ok.url = "http://test.com"
+
+        mock_get.side_effect = [mock_resp_503, mock_resp_ok]
+
+        client = FlareSolverrClient(
+            rate_limit_delay=0.01,
+            jitter_range=0.0,
+            max_retries=2,
+            base_backoff=0.01,
+        )
+        res = client.fetch("http://test.com", method="GET")
+        assert res["status_code"] == 200
+        assert mock_get.call_count == 2
+
 
 class TestRealtorScraper:
-    """Tests for Realtor scraper regions and parsing."""
+    """Tests for Realtor scraper regions, parsing, and pagination."""
 
     def test_covered_regions_coverage(self):
         expected_gva = [
             "Vancouver", "Surrey", "Burnaby", "Richmond", "Coquitlam",
             "New Westminster", "West Vancouver", "North Vancouver", "Delta",
-            "White Rock", "Maple Ridge", "Port Coquitlam", "Port Moody"
+            "White Rock", "Maple Ridge", "Port Coquitlam", "Port Moody", "Langley"
         ]
         expected_fv = ["Abbotsford", "Mission", "Chilliwack", "Aldergrove", "Hope"]
 
@@ -91,6 +144,18 @@ class TestRealtorScraper:
             assert len(bounds) == 4
             assert bounds[0] < bounds[1], f"Lat min >= lat max for {city}"
             assert bounds[2] < bounds[3], f"Lon min >= lon max for {city}"
+
+    def test_get_region_config_case_insensitive_and_aliases(self):
+        cfg1 = RealtorScraper.get_region_config("vancouver")
+        assert cfg1 is not None
+        assert cfg1["region"] == "Greater Vancouver"
+
+        cfg2 = RealtorScraper.get_region_config("Langley")
+        assert cfg2 is not None
+
+        cfg3 = RealtorScraper.get_region_config("chilliwack")
+        assert cfg3 is not None
+        assert cfg3["region"] == "Fraser Valley"
 
     def test_price_and_numeric_parsing(self):
         scraper = RealtorScraper()
@@ -115,6 +180,8 @@ class TestBCAssessmentScraper:
         scraper = BCAssessmentScraper()
         assert scraper.clean_address_query("#304 - 1250 Robson St") == "1250 Robson St"
         assert scraper.clean_address_query("1250 Robson St, Vancouver, BC") == "1250 Robson St Vancouver BC"
+        # Test pipe delimiter replacement from Realtor.ca addresses
+        assert scraper.clean_address_query("1250 Robson St|Vancouver, BC") == "1250 Robson St Vancouver BC"
 
     def test_parse_detailed_assessment(self):
         scraper = BCAssessmentScraper()
@@ -156,6 +223,13 @@ class TestDataTransformer:
         assert parts2["street_number"] == "7890"
         assert "120th Street" in parts2["street_name"]
         assert parts2["postal_code"] == "V3W3N1"
+
+        # Unit without dash
+        addr3 = "Unit 12B, 456 Elm Ave|Richmond, BC V6X 1A1"
+        parts3 = DataTransformer.parse_address_parts(addr3)
+        assert parts3["unit_number"] == "12B"
+        assert parts3["street_number"] == "456"
+        assert "Elm Ave" in parts3["street_name"]
 
     def test_denormalize_sale_history_last_3_sales(self):
         sales = [
@@ -240,6 +314,16 @@ class TestDataTransformer:
         assert DataTransformer.parse_date("2025/11/05") == "2025-11-05"
         # ISO
         assert DataTransformer.parse_date("2026-03-15") == "2026-03-15"
+        # Textual date format: "15 Jan 2026" and "May 15, 2026"
+        assert DataTransformer.parse_date("15 Jan 2026") == "2026-01-15"
+        assert DataTransformer.parse_date("May 15, 2026") == "2026-05-15"
+
+    def test_parse_numeric_ranges_and_plus_sums(self):
+        # "3 + 1" bedrooms (3 main + 1 basement)
+        assert DataTransformer.parse_numeric("3 + 1") == 4.0
+        assert DataTransformer.parse_int("3 + 1") == 4
+        # Range averaging: "1,200 - 1,400 sqft" -> 1300.0
+        assert DataTransformer.parse_numeric("1,200 - 1,400 sqft") == 1300.0
 
     def test_mls_number_collision_prevention(self):
         listing1 = {"Property": {"Address": {"AddressText": "100 A St"}, "Price": 500000}}
@@ -252,7 +336,7 @@ class TestDataTransformer:
 
 
 class TestDBStorage:
-    """Tests SQLite persistence, indexing, upserts, and CSV exports."""
+    """Tests SQLite persistence, indexing, upserts, WAL mode, and CSV exports."""
 
     def test_db_init_and_upsert(self):
         with tempfile.NamedTemporaryFile(suffix=".db") as tmp_db:
@@ -300,3 +384,132 @@ class TestDBStorage:
             assert stats["with_sale_history"] == 1
             assert len(stats["city_breakdown"]) == 1
             assert stats["city_breakdown"][0]["city"] == "Vancouver"
+
+    def test_empty_db_csv_export_has_headers(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp_db:
+            storage = DBStorage(db_path=tmp_db.name)
+            with tempfile.NamedTemporaryFile(suffix=".csv") as tmp_csv:
+                rows = storage.export_to_csv(tmp_csv.name)
+                assert rows == 0
+                with open(tmp_csv.name, "r") as f:
+                    header = f.readline().strip()
+                    assert "mls_number" in header
+                    assert "listing_price" in header
+
+
+class TestAirflowDAGStructure:
+    """Tests Airflow DAG topology, task structure, and callables."""
+
+    def test_dag_properties(self):
+        assert dag.dag_id == "daily_real_estate_collector"
+        assert dag.schedule_interval == "@daily"
+        assert dag.catchup is False
+        assert dag.max_active_runs == 1
+
+    def test_dag_task_graph_dependencies(self):
+        # init_storage is upstream of city tasks
+        init_task = next(t for t in dag.tasks if t.task_id == "init_storage")
+        export_task = next(t for t in dag.tasks if t.task_id == "export_csv_dataset")
+        summary_task = next(t for t in dag.tasks if t.task_id == "pipeline_summary_report")
+
+        assert len(init_task.downstream_list) >= 15
+        assert summary_task in export_task.downstream_list
+
+    def test_task_init_storage_and_summary_callables(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp_db:
+            with patch("dags.real_estate_collector_dag.SQLITE_PATH", tmp_db.name):
+                res_init = task_init_storage()
+                assert res_init["status"] == "initialized"
+
+                res_summary = task_pipeline_summary()
+                assert res_summary["total_listings"] == 0
+
+    def test_end_to_end_dag_pipeline(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            csv_path = os.path.join(tmpdir, "test.csv")
+
+            with patch("dags.real_estate_collector_dag.SQLITE_PATH", db_path), \
+                 patch("dags.real_estate_collector_dag.CSV_PATH", csv_path):
+
+                # 1. Initialize DB schema
+                init_res = task_init_storage()
+                assert init_res["status"] == "initialized"
+                assert os.path.exists(db_path)
+
+                # 2. Mock listing and assessment
+                mock_listing = {
+                    "MlsNumber": "R9998887",
+                    "Id": "8887776",
+                    "Property": {
+                        "Price": "$1,388,000",
+                        "Address": {
+                            "AddressText": "#301 - 1234 Robson St|Vancouver, BC V6E 1B2",
+                            "City": "Vancouver",
+                            "Latitude": 49.285,
+                            "Longitude": -123.128,
+                        },
+                        "ParkingSpaceTotal": "2",
+                    },
+                    "Building": {
+                        "Bedrooms": "3 + 1",
+                        "BathroomTotal": "3",
+                        "SizeInterior": "1,400 - 1,600 sqft",
+                        "ConstructedDate": "2015",
+                        "HeatingType": "Heat Pump",
+                        "CoolingType": "Air Conditioned",
+                    },
+                    "PublicRemarks": "Luxury townhome with fireplace and private garden.",
+                    "InsertedDateUTC": "2026-05-01T00:00:00Z",
+                    "HistoricalSales": [
+                        {"Price": "$1,150,000", "Date": "2021-03-15"},
+                        {"Price": "$950,000", "Date": "2017-06-20"},
+                    ],
+                }
+
+                mock_bca_res = {
+                    "bc_assessment_id": "01-081-999-001",
+                    "bc_total_assessed_value": 1290000.0,
+                    "bc_land_value": 700000.0,
+                    "bc_improvement_value": 590000.0,
+                    "bc_previous_year_value": 1210000.0,
+                    "bc_assessment_year": 2026,
+                    "bc_property_class": "01 - Residential",
+                    "bc_sales_history": [],
+                }
+
+                from dags.real_estate_collector_dag import RealtorScraper, BCAssessmentScraper
+                with patch.object(RealtorScraper, "fetch_city_listings", return_value=[mock_listing]), \
+                     patch.object(BCAssessmentScraper, "fetch_assessment_for_address", return_value=mock_bca_res):
+                    collect_res = task_collect_and_enrich_city("Vancouver", max_pages=1)
+                    assert collect_res["listings_processed"] == 1
+
+                # 3. Export CSV
+                export_res = task_export_csv()
+                assert export_res["rows_exported"] == 1
+                assert os.path.exists(csv_path)
+
+                # 4. Pipeline Summary
+                summary = task_pipeline_summary()
+                assert summary["total_listings"] == 1
+                assert summary["with_sale_history"] == 1
+                assert summary["with_bc_assessment"] == 1
+
+                # Verify database content directly
+                storage = DBStorage(db_path=db_path)
+                with storage.get_connection() as conn:
+                    c = conn.cursor()
+                    c.execute("SELECT mls_number, unit_number, street_number, bedrooms, square_footage, listing_price, sale_price_1, sale_date_1, sale_price_2, sale_date_2, fireplace, garden FROM real_estate_listings")
+                    row = c.fetchone()
+                    assert row["mls_number"] == "R9998887"
+                    assert row["unit_number"] == "301"
+                    assert row["street_number"] == "1234"
+                    assert row["bedrooms"] == 4  # 3+1
+                    assert row["square_footage"] == 1500.0  # avg 1400-1600
+                    assert row["listing_price"] == 1388000.0
+                    assert row["sale_price_1"] == 1150000.0
+                    assert row["sale_date_1"] == "2021-03-15"
+                    assert row["sale_price_2"] == 950000.0
+                    assert row["sale_date_2"] == "2017-06-20"
+                    assert row["fireplace"] == 1
+                    assert row["garden"] == 1

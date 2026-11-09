@@ -21,6 +21,12 @@ services:
           memory: 1024M
     networks:
       - airflow_net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8191/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   postgres:
     image: postgres:13-alpine
@@ -28,16 +34,22 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${PG_USERNAME:-airflow}
-      POSTGRES_PASSWORD: ${PG_PASSWORD:-airflow}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-airflow_secret_pass}
       POSTGRES_DB: ${PG_DATABASE:-airflow}
       AIRFLOW_DB_NAME: ${AIRFLOW_DB_NAME:-airflow}
       AIRFLOW_DB_USER: ${AIRFLOW_DB_USER:-airflow}
-      AIRFLOW_DB_PASS: ${AIRFLOW_DB_PASS:-airflow}
+      AIRFLOW_DB_PASS: ${AIRFLOW_DB_PASS:-airflow_secret_pass}
     volumes:
       - pg_data:/var/lib/postgresql/data
       - ./db-init-scripts:/docker-entrypoint-initdb.d
     networks:
       - airflow_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USERNAME:-airflow} -d ${PG_DATABASE:-airflow}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
   airflow_setup:
     image: apache/airflow:2.11.2
@@ -45,11 +57,11 @@ services:
     entrypoint: []
     command: >
       bash -c '
-        airflow db upgrade &&
-        airflow users create --username "${AIRFLOW_ADMIN_USER:-admin}" --firstname "${AIRFLOW_ADMIN_FIRSTNAME:-Admin}" --lastname "${AIRFLOW_ADMIN_LASTNAME:-User}" --role "${AIRFLOW_ADMIN_ROLE:-Admin}" --email "${AIRFLOW_ADMIN_EMAIL:-admin@example.com}" --password "${AIRFLOW_ADMIN_PASS:-admin}"
+        (airflow db migrate || airflow db upgrade) &&
+        (airflow users create --username "${AIRFLOW_ADMIN_USER:-admin}" --firstname "${AIRFLOW_ADMIN_FIRSTNAME:-Admin}" --lastname "${AIRFLOW_ADMIN_LASTNAME:-User}" --role "${AIRFLOW_ADMIN_ROLE:-Admin}" --email "${AIRFLOW_ADMIN_EMAIL:-admin@example.com}" --password "${AIRFLOW_ADMIN_PASS:-admin}" || true)
       '
     environment:
-      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASS:-airflow}@postgres:5432/${AIRFLOW_DB_NAME:-airflow}
+      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASS:-airflow_secret_pass}@postgres:5432/${AIRFLOW_DB_NAME:-airflow}
       AIRFLOW__WEBSERVER__BASE_URL: ${AIRFLOW_PUBLIC_URL:-http://localhost:8080}
       AIRFLOW_ADMIN_USER: ${AIRFLOW_ADMIN_USER:-admin}
       AIRFLOW_ADMIN_FIRSTNAME: ${AIRFLOW_ADMIN_FIRSTNAME:-Admin}
@@ -57,6 +69,7 @@ services:
       AIRFLOW_ADMIN_ROLE: ${AIRFLOW_ADMIN_ROLE:-Admin}
       AIRFLOW_ADMIN_EMAIL: ${AIRFLOW_ADMIN_EMAIL:-admin@example.com}
       AIRFLOW_ADMIN_PASS: ${AIRFLOW_ADMIN_PASS:-admin}
+      _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
     volumes:
       - ./plugins:/opt/airflow/plugins
       - ./dags:/opt/airflow/dags
@@ -65,7 +78,8 @@ services:
     networks:
       - airflow_net
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
 
   airflow_webserver:
     image: apache/airflow:2.11.2
@@ -73,14 +87,15 @@ services:
     restart: unless-stopped
     command: ["webserver"]
     environment:
-      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASS:-airflow}@postgres:5432/${AIRFLOW_DB_NAME:-airflow}
+      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASS:-airflow_secret_pass}@postgres:5432/${AIRFLOW_DB_NAME:-airflow}
       AIRFLOW__WEBSERVER__BASE_URL: ${AIRFLOW_PUBLIC_URL:-http://localhost:8080}
-      AIRFLOW__CORE__EXECUTOR: ${AIRFLOW_CORE_EXECUTOR:-SequentialExecutor}
+      AIRFLOW__CORE__EXECUTOR: ${AIRFLOW_CORE_EXECUTOR:-LocalExecutor}
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
-      FLARESOLVERR_URL: http://flaresolverr:8191/v1
-      SQLITE_DB_PATH: /opt/airflow/data/real_estate.db
-      CSV_OUTPUT_PATH: /opt/airflow/data/real_estate_listings.csv
+      FLARESOLVERR_URL: ${FLARESOLVERR_URL:-http://flaresolverr:8191/v1}
+      SQLITE_DB_PATH: ${SQLITE_DB_PATH:-/opt/airflow/data/real_estate.db}
+      CSV_OUTPUT_PATH: ${CSV_OUTPUT_PATH:-/opt/airflow/data/real_estate_listings.csv}
+      _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
     ports:
       - "${AIRFLOW_WEB_PORT:-8080}:8080"
     volumes:
@@ -91,8 +106,10 @@ services:
     networks:
       - airflow_net
     depends_on:
-      - postgres
-      - airflow_setup
+      postgres:
+        condition: service_healthy
+      airflow_setup:
+        condition: service_completed_successfully
 
   airflow_scheduler:
     image: apache/airflow:2.11.2
@@ -100,13 +117,14 @@ services:
     restart: unless-stopped
     command: ["scheduler"]
     environment:
-      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASS:-airflow}@postgres:5432/${AIRFLOW_DB_NAME:-airflow}
+      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASS:-airflow_secret_pass}@postgres:5432/${AIRFLOW_DB_NAME:-airflow}
       AIRFLOW__WEBSERVER__BASE_URL: ${AIRFLOW_PUBLIC_URL:-http://localhost:8080}
-      AIRFLOW__CORE__EXECUTOR: ${AIRFLOW_CORE_EXECUTOR:-SequentialExecutor}
+      AIRFLOW__CORE__EXECUTOR: ${AIRFLOW_CORE_EXECUTOR:-LocalExecutor}
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      FLARESOLVERR_URL: http://flaresolverr:8191/v1
-      SQLITE_DB_PATH: /opt/airflow/data/real_estate.db
-      CSV_OUTPUT_PATH: /opt/airflow/data/real_estate_listings.csv
+      FLARESOLVERR_URL: ${FLARESOLVERR_URL:-http://flaresolverr:8191/v1}
+      SQLITE_DB_PATH: ${SQLITE_DB_PATH:-/opt/airflow/data/real_estate.db}
+      CSV_OUTPUT_PATH: ${CSV_OUTPUT_PATH:-/opt/airflow/data/real_estate_listings.csv}
+      _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
     volumes:
       - ./plugins:/opt/airflow/plugins
       - ./dags:/opt/airflow/dags
@@ -115,9 +133,12 @@ services:
     networks:
       - airflow_net
     depends_on:
-      - postgres
-      - airflow_setup
-      - flaresolverr
+      postgres:
+        condition: service_healthy
+      airflow_setup:
+        condition: service_completed_successfully
+      flaresolverr:
+        condition: service_started
 
 volumes:
   pg_data:

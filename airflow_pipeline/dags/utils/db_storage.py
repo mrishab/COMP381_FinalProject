@@ -1,13 +1,14 @@
 """Database Storage and CSV Exporter for Real Estate Pipeline.
 
 Manages SQLite storage, table creation, indexing, atomic upserts,
-and CSV exports.
+and CSV exports with WAL mode and lock-retry protection.
 """
 
 import csv
 import logging
 import os
 import sqlite3
+import time
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,20 @@ CREATE INDEX IF NOT EXISTS idx_listings_price ON real_estate_listings(listing_pr
 CREATE INDEX IF NOT EXISTS idx_listings_date ON real_estate_listings(date_listed);
 """
 
+ALL_COLUMNS = [
+    "mls_number", "realtor_id", "url", "region", "city", "province",
+    "unit_number", "street_number", "street_name", "postal_code", "full_address",
+    "latitude", "longitude", "listing_price", "date_listed", "days_on_market",
+    "transaction_type", "property_type", "bedrooms", "bathrooms", "half_bathrooms",
+    "stories", "year_built", "square_footage", "lot_size_sqft", "acreage",
+    "parking_spaces", "garage", "heating", "cooling", "basement", "exterior",
+    "roof", "flooring", "sewer", "pool", "fireplace", "waterfront",
+    "garden", "balcony", "bc_assessment_id", "bc_total_assessed_value",
+    "bc_land_value", "bc_improvement_value", "bc_previous_year_value",
+    "bc_assessment_year", "bc_property_class", "sale_price_1", "sale_date_1",
+    "sale_price_2", "sale_date_2", "sale_price_3", "sale_date_3", "sales_history_json", "scraped_at"
+]
+
 
 class DBStorage:
     """Handles SQLite persistence and CSV file output for real estate listings."""
@@ -87,35 +102,28 @@ class DBStorage:
         self.init_db()
 
     def get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        """Establishes SQLite connection with 60s busy timeout and Row factory."""
+        conn = sqlite3.connect(self.db_path, timeout=60.0)
         conn.row_factory = sqlite3.Row
         return conn
 
     def init_db(self) -> None:
-        """Initializes tables and indices."""
+        """Initializes tables, indices, and WAL journal mode for concurrent execution."""
         with self.get_connection() as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA busy_timeout=60000;")
             conn.executescript(CREATE_TABLE_SQL)
             conn.commit()
 
-    def upsert_listings(self, listings: List[Dict[str, Any]]) -> int:
-        """Upserts a batch of listing records. Returns number of rows inserted/updated."""
+    def upsert_listings(self, listings: List[Dict[str, Any]], max_retries: int = 5) -> int:
+        """Upserts a batch of listing records. Returns number of rows inserted/updated.
+
+        Features retry backoff to survive concurrent Airflow tasks writing simultaneously.
+        """
         if not listings:
             return 0
 
-        columns = [
-            "mls_number", "realtor_id", "url", "region", "city", "province",
-            "unit_number", "street_number", "street_name", "postal_code", "full_address",
-            "latitude", "longitude", "listing_price", "date_listed", "days_on_market",
-            "transaction_type", "property_type", "bedrooms", "bathrooms", "half_bathrooms",
-            "stories", "year_built", "square_footage", "lot_size_sqft", "acreage",
-            "parking_spaces", "garage", "heating", "cooling", "basement", "exterior",
-            "roof", "flooring", "sewer", "pool", "fireplace", "waterfront",
-            "garden", "balcony", "bc_assessment_id", "bc_total_assessed_value",
-            "bc_land_value", "bc_improvement_value", "bc_previous_year_value",
-            "bc_assessment_year", "bc_property_class", "sale_price_1", "sale_date_1",
-            "sale_price_2", "sale_date_2", "sale_price_3", "sale_date_3", "sales_history_json", "scraped_at"
-        ]
-
+        columns = ALL_COLUMNS
         placeholders = ", ".join(["?"] * len(columns))
         col_names = ", ".join(columns)
         update_assignments = ", ".join(
@@ -133,31 +141,41 @@ class DBStorage:
         for item in listings:
             rows.append(tuple(item.get(c) for c in columns))
 
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.executemany(upsert_sql, rows)
-            conn.commit()
-            return cursor.rowcount
+        for attempt in range(1, max_retries + 1):
+            try:
+                with self.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.executemany(upsert_sql, rows)
+                    conn.commit()
+                    return cursor.rowcount
+            except sqlite3.OperationalError as e:
+                if ("locked" in str(e).lower() or "busy" in str(e).lower()) and attempt < max_retries:
+                    sleep_time = 0.2 * (2 ** (attempt - 1))
+                    logger.warning(f"Database locked, retrying upsert in {sleep_time:.2f}s (attempt {attempt}/{max_retries})...")
+                    time.sleep(sleep_time)
+                else:
+                    raise
+
+        return 0
 
     def export_to_csv(self, csv_path: str = "/opt/airflow/data/real_estate_listings.csv") -> int:
-        """Exports all database listings to a CSV file. Returns total exported rows."""
+        """Exports all database listings to a CSV file. Writes headers even if empty. Returns row count."""
         os.makedirs(os.path.dirname(os.path.abspath(csv_path)), exist_ok=True)
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM real_estate_listings ORDER BY date_listed DESC")
             rows = cursor.fetchall()
 
-            if not rows:
-                return 0
+            headers = [desc[0] for desc in cursor.description] if cursor.description else ALL_COLUMNS
 
-            headers = [desc[0] for desc in cursor.description]
             with open(csv_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 writer.writerow(headers)
-                for row in rows:
-                    writer.writerow(list(row))
+                if rows:
+                    for row in rows:
+                        writer.writerow(list(row))
 
-            return len(rows)
+            return len(rows) if rows else 0
 
     def get_summary_stats(self) -> Dict[str, Any]:
         """Calculates high-level dataset metrics."""

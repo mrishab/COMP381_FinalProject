@@ -30,9 +30,9 @@ class BCAssessmentScraper:
         }
 
     def clean_address_query(self, address: str) -> str:
-        """Strips unit symbols or special characters for optimal geocoding on BCAssessment."""
+        """Strips unit symbols, pipes, or special characters for optimal geocoding on BCAssessment."""
         cleaned = re.sub(r"^[#\s]*\w+\s*[-/]\s*", "", address.strip())
-        cleaned = re.sub(r"[,#\n\r]+", " ", cleaned)
+        cleaned = re.sub(r"[,#|\n\r]+", " ", cleaned)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         return cleaned
 

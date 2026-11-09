@@ -26,6 +26,7 @@ COVERED_REGIONS: Dict[str, Dict[str, Any]] = {
     "North Vancouver": {"bounds": (49.2900, 49.3900, -123.1200, -122.9500), "region": "Greater Vancouver"},
     "Delta": {"bounds": (49.0020, 49.1900, -123.1600, -122.8700), "region": "Greater Vancouver"},
     "White Rock": {"bounds": (49.0100, 49.0400, -122.8300, -122.7800), "region": "Greater Vancouver"},
+    "Langley": {"bounds": (49.0020, 49.1800, -122.6800, -122.4400), "region": "Greater Vancouver"},
     "Langley City": {"bounds": (49.0850, 49.1200, -122.6800, -122.6300), "region": "Greater Vancouver"},
     "Township of Langley": {"bounds": (49.0020, 49.1800, -122.6800, -122.4800), "region": "Greater Vancouver"},
     "Port Coquitlam": {"bounds": (49.2300, 49.2900, -122.8000, -122.7300), "region": "Greater Vancouver"},
@@ -55,6 +56,20 @@ class RealtorScraper:
 
     def __init__(self, client: Optional[FlareSolverrClient] = None):
         self.client = client or FlareSolverrClient()
+
+    @staticmethod
+    def get_region_config(city_name: str) -> Optional[Dict[str, Any]]:
+        """Resolves municipality configuration with case-insensitive and alias support."""
+        if city_name in COVERED_REGIONS:
+            return COVERED_REGIONS[city_name]
+        lower_name = city_name.strip().lower()
+        for k, v in COVERED_REGIONS.items():
+            if k.lower() == lower_name:
+                return v
+        # Alias checks
+        if lower_name == "langley":
+            return COVERED_REGIONS.get("Langley") or COVERED_REGIONS.get("Township of Langley")
+        return None
 
     def parse_ms_date(self, date_str: Optional[str]) -> Optional[str]:
         """Parses ASP.NET JSON dates like '/Date(1710000000000)/' or ISO strings."""
@@ -118,7 +133,7 @@ class RealtorScraper:
             "LatitudeMax": lat_max,
             "LongitudeMin": lon_min,
             "LongitudeMax": lon_max,
-            "SortBy": 6,  # Listed date descending (newest first)
+            "SortBy": 6,  # Listed date descending (newest first for daily fresh inventory)
             "SortOrder": "D",
         }
 
@@ -126,11 +141,12 @@ class RealtorScraper:
         self,
         city_name: str,
         max_pages: int = 5,
+        max_days_old: Optional[int] = None,
     ) -> Generator[Dict[str, Any], None, None]:
         """Yields raw property listing dicts for a city across paginated results."""
-        config = COVERED_REGIONS.get(city_name)
+        config = self.get_region_config(city_name)
         if not config:
-            logger.warning(f"Unknown city {city_name}. Searching by default envelope.")
+            logger.warning(f"Unknown city {city_name}. Skipping collection.")
             return
 
         lat_min, lat_max, lon_min, lon_max = config["bounds"]
@@ -166,10 +182,35 @@ class RealtorScraper:
                     logger.info(f"No more results for {city_name} on page {page}")
                     break
 
+                stop_early = False
                 for listing in results:
                     listing["_queried_city"] = city_name
                     listing["_region"] = config["region"]
+
+                    # Check fresh inventory cutoff if configured
+                    if max_days_old is not None:
+                        date_str = (
+                            listing.get("InsertedDateUTC")
+                            or listing.get("DateListed")
+                            or listing.get("Property", {}).get("InsertedDateUTC")
+                        )
+                        parsed_d = self.parse_ms_date(date_str)
+                        if parsed_d:
+                            try:
+                                dt = datetime.date.fromisoformat(parsed_d)
+                                today = datetime.datetime.now(datetime.timezone.utc).date()
+                                if (today - dt).days > max_days_old:
+                                    # Since results are sorted newest-first, we can stop
+                                    stop_early = True
+                                    break
+                            except Exception:
+                                pass
+
                     yield listing
+
+                if stop_early:
+                    logger.info(f"Reached listings older than {max_days_old} days for {city_name}. Stopping page traversal.")
+                    break
 
                 paging = data.get("Paging", {})
                 total_pages = paging.get("TotalPages", 1)

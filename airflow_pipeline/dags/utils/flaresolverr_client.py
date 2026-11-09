@@ -7,6 +7,7 @@ rate limiting and exponential backoff to handle HTTP 429 and connection issues.
 
 import json
 import logging
+import os
 import random
 import time
 import urllib.parse
@@ -69,7 +70,10 @@ class FlareSolverrClient:
     def is_flaresolverr_available(self) -> bool:
         """Checks if the FlareSolverr service is reachable."""
         try:
-            resp = self.session.get(self.flaresolverr_url.replace("/v1", ""), timeout=3)
+            base_url = self.flaresolverr_url.rstrip("/")
+            if base_url.endswith("/v1"):
+                base_url = base_url[:-3]
+            resp = self.session.get(base_url or self.flaresolverr_url, timeout=3)
             return resp.status_code in (200, 404, 405)
         except Exception:
             return False
@@ -89,7 +93,8 @@ class FlareSolverrClient:
             "maxTimeout": self.timeout * 1000,
         }
         if post_data and method.upper() == "POST":
-            content_type = (headers or {}).get("Content-Type", "")
+            # Case-insensitive Content-Type lookup
+            content_type = next((v for k, v in (headers or {}).items() if k.lower() == "content-type"), "")
             if isinstance(post_data, dict):
                 if "json" in content_type.lower():
                     payload["postData"] = json.dumps(post_data)
@@ -156,9 +161,12 @@ class FlareSolverrClient:
         data: Optional[Any] = None,
         json_data: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
-        prefer_flaresolverr: bool = False,
+        prefer_flaresolverr: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Fetches URL with rate limiting, FlareSolverr detection, and exponential backoff."""
+        if prefer_flaresolverr is None:
+            prefer_flaresolverr = os.getenv("PREFER_FLARESOLVERR", "false").lower() in ("true", "1", "yes")
+
         use_flaresolverr = prefer_flaresolverr and self.is_flaresolverr_available()
 
         for attempt in range(1, self.max_retries + 1):
@@ -168,8 +176,9 @@ class FlareSolverrClient:
                 if use_flaresolverr:
                     post_body = json_data or data
                     res = self.request_via_flaresolverr(url, method=method, post_data=post_body, headers=headers)
-                    if res["status_code"] == 429:
-                        raise requests.exceptions.HTTPError("429 Too Many Requests from FlareSolverr")
+                    sc = res.get("status_code", 200)
+                    if sc in (429, 500, 502, 503, 504):
+                        raise requests.exceptions.HTTPError(f"HTTP {sc} from FlareSolverr: {str(res.get('response', ''))[:100]}")
                     return res
                 else:
                     resp = self.direct_request(url, method=method, data=data, json_data=json_data, headers=headers)
@@ -185,8 +194,8 @@ class FlareSolverrClient:
                             use_flaresolverr = True
                             continue
 
-                    if resp.status_code == 429:
-                        raise requests.exceptions.HTTPError(f"429 Too Many Requests: {resp.text[:100]}")
+                    if resp.status_code in (429, 500, 502, 503, 504):
+                        raise requests.exceptions.HTTPError(f"HTTP {resp.status_code}: {resp.text[:100]}")
 
                     resp.raise_for_status()
 

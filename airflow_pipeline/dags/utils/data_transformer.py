@@ -10,6 +10,21 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+MONTH_NAMES = {
+    "jan": 1, "january": 1,
+    "feb": 2, "february": 2,
+    "mar": 3, "march": 3,
+    "apr": 4, "april": 4,
+    "may": 5,
+    "jun": 6, "june": 6,
+    "jul": 7, "july": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "september": 9,
+    "oct": 10, "october": 10,
+    "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
+}
+
 
 class DataTransformer:
     """Transforms raw listing and assessment records into atomic schema rows."""
@@ -20,11 +35,29 @@ class DataTransformer:
             return None
         if isinstance(val, (int, float)):
             return float(val)
-        cleaned = re.sub(r"[^\d.]", "", str(val))
-        try:
-            return float(cleaned) if cleaned else None
-        except ValueError:
-            return None
+        if isinstance(val, dict):
+            val = val.get("Value") or val.get("Amount") or val.get("$t") or val.get("Price")
+            if val is None:
+                return None
+            if isinstance(val, (int, float)):
+                return float(val)
+
+        s = str(val).strip().replace(",", "")
+
+        # Handle plus expressions e.g. "3 + 1" bedrooms (3 main + 1 basement)
+        if "+" in s:
+            nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", s)]
+            if nums:
+                return sum(nums)
+
+        # Handle numeric ranges e.g. "1,200 - 1,400 sqft"
+        if re.search(r"\d+\s*-\s*\d+", s):
+            nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", s)]
+            if len(nums) == 2:
+                return (nums[0] + nums[1]) / 2.0
+
+        match = re.search(r"\d+(?:\.\d+)?", s)
+        return float(match.group(0)) if match else None
 
     @staticmethod
     def parse_int(val: Any) -> Optional[int]:
@@ -34,7 +67,7 @@ class DataTransformer:
     @staticmethod
     def parse_address_parts(raw_address: str) -> Dict[str, Optional[str]]:
         """Parses address string into atomic unit, street number, street name, and postal code."""
-        parts = {
+        parts: Dict[str, Optional[str]] = {
             "unit_number": None,
             "street_number": None,
             "street_name": None,
@@ -57,6 +90,14 @@ class DataTransformer:
             parts["street_name"] = unit_match.group(3).strip()
             return parts
 
+        # Check for unit e.g. Unit 12B, 456 Elm Ave or Apt 402 1100 Cambie St
+        unit_match2 = re.match(r"(?:#|APT|UNIT|SUITE)\s*([A-Za-z0-9]+)[,\s]+(\d+)\s+(.+)", street_part, re.IGNORECASE)
+        if unit_match2:
+            parts["unit_number"] = unit_match2.group(1)
+            parts["street_number"] = unit_match2.group(2)
+            parts["street_name"] = unit_match2.group(3).strip()
+            return parts
+
         # Standard street number and name: 1234 Main St
         num_match = re.match(r"(\d+)\s+(.+)", street_part)
         if num_match:
@@ -72,6 +113,7 @@ class DataTransformer:
         """Converts diverse date representations into ISO YYYY-MM-DD format."""
         if not date_val:
             return None
+
         # /Date(1710000000000)/
         ms_match = re.search(r"/Date\((\d+)\)/", str(date_val))
         if ms_match:
@@ -79,7 +121,8 @@ class DataTransformer:
             return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).strftime("%Y-%m-%d")
 
         s = str(date_val).strip()
-        # ISO format YYYY-MM-DD
+
+        # ISO format YYYY-MM-DD (optionally followed by T or space and time)
         iso_match = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", s)
         if iso_match:
             try:
@@ -124,6 +167,27 @@ class DataTransformer:
                     except ValueError:
                         pass
 
+        # Textual month e.g. "15 Jan 2026" or "May 15, 2026"
+        text_dmy = re.search(r"\b(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})\b", s)
+        if text_dmy:
+            day, mon_str, year = int(text_dmy.group(1)), text_dmy.group(2).lower(), int(text_dmy.group(3))
+            mon = MONTH_NAMES.get(mon_str)
+            if mon:
+                try:
+                    return datetime.date(year, mon, day).isoformat()
+                except ValueError:
+                    pass
+
+        text_mdy = re.search(r"\b([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})\b", s)
+        if text_mdy:
+            mon_str, day, year = text_mdy.group(1).lower(), int(text_mdy.group(2)), int(text_mdy.group(3))
+            mon = MONTH_NAMES.get(mon_str)
+            if mon:
+                try:
+                    return datetime.date(year, mon, day).isoformat()
+                except ValueError:
+                    pass
+
         return None
 
     @staticmethod
@@ -142,9 +206,9 @@ class DataTransformer:
         # Filter valid sales and sort by date descending
         valid_sales = []
         for s in sales:
-            p = DataTransformer.parse_numeric(s.get("price") or s.get("SalePrice"))
-            d = DataTransformer.parse_date(s.get("date") or s.get("SaleDate"))
-            if p or d:
+            p = DataTransformer.parse_numeric(s.get("price") or s.get("SalePrice") or s.get("Price") or s.get("SoldPrice"))
+            d = DataTransformer.parse_date(s.get("date") or s.get("SaleDate") or s.get("SoldDate") or s.get("Date"))
+            if p is not None or d is not None:
                 valid_sales.append({"price": p, "date": d})
 
         valid_sales.sort(key=lambda x: x["date"] or "", reverse=True)
@@ -197,8 +261,17 @@ class DataTransformer:
         elif lot_size_sqft:
             acreage = round(lot_size_sqft / 43560.0, 4)
 
-        # Date listed
-        date_listed = cls.parse_date(listing.get("InsertedDateUTC") or listing.get("DateListed"))
+        # Date listed (search across all common Realtor fields)
+        raw_date = (
+            listing.get("InsertedDateUTC")
+            or listing.get("DateListed")
+            or listing.get("InsertedDate")
+            or listing.get("ListingContractDate")
+            or listing.get("LastUpdated")
+            or prop.get("InsertedDateUTC")
+            or prop.get("DateListed")
+        )
+        date_listed = cls.parse_date(raw_date)
         if not date_listed:
             # Fallback to current date if missing from active feed
             date_listed = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
