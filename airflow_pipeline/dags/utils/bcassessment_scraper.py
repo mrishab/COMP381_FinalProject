@@ -30,11 +30,19 @@ class BCAssessmentScraper:
         }
 
     def clean_address_query(self, address: str) -> str:
-        """Strips unit symbols, pipes, or special characters for optimal geocoding on BCAssessment."""
-        cleaned = re.sub(r"^[#\s]*\w+\s*[-/]\s*", "", address.strip())
-        cleaned = re.sub(r"[,#|\n\r]+", " ", cleaned)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip()
-        return cleaned
+        """Strips unit symbols, pipes, postal codes, or special characters for optimal geocoding on BCAssessment."""
+        if not address:
+            return ""
+        s = address.strip().replace("|", " ")
+        # Strip Canadian postal codes e.g. V6B 5L7 or V6B5L7
+        s = re.sub(r"\b[A-Za-z]\d[A-Za-z]\s*\d[A-Za-z]\d\b", "", s)
+        # Strip unit prefix like #301 -, Unit 12B, Apt 402, Suite 10, etc.
+        s = re.sub(r"^(?:#|APT|UNIT|SUITE)?\s*[A-Za-z0-9]+\s*[-/]\s*", "", s, flags=re.IGNORECASE)
+        s = re.sub(r"^(?:#|APT|UNIT|SUITE)\s*[A-Za-z0-9]+[,\s]+", "", s, flags=re.IGNORECASE)
+        # Clean punctuation
+        s = re.sub(r"[,#\n\r]+", " ", s)
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
 
     def search_property(self, address: str) -> List[Dict[str, Any]]:
         """Searches BC Assessment for address matches."""
@@ -45,7 +53,7 @@ class BCAssessmentScraper:
         try:
             res = self.client.fetch(url, method="GET", headers=self.headers)
             body = res.get("response", "[]")
-            data = json.loads(body) if isinstance(body, str) else body
+            data = FlareSolverrClient.extract_json_response(body)
             return data if isinstance(data, list) else []
         except Exception as e:
             logger.debug(f"BCAssessment lookup failed for '{address}': {e}")
@@ -57,7 +65,8 @@ class BCAssessmentScraper:
         try:
             res = self.client.fetch(url, method="GET", headers=self.headers)
             body = res.get("response", "{}")
-            return json.loads(body) if isinstance(body, str) else body
+            data = FlareSolverrClient.extract_json_response(body)
+            return data if isinstance(data, dict) else None
         except Exception as e:
             logger.debug(f"Failed to fetch BCAssessment details for {property_id}: {e}")
             return None
@@ -142,7 +151,7 @@ class BCAssessmentScraper:
             "bc_previous_year_value": self._parse_currency(
                 data.get("PreviousYearTotalAssessedValue")
             ),
-            "bc_assessment_year": data.get("AssessmentYear"),
+            "bc_assessment_year": int(data.get("AssessmentYear")) if data.get("AssessmentYear") and str(data.get("AssessmentYear")).isdigit() else data.get("AssessmentYear"),
             "bc_property_class": data.get("PropertyClass") or data.get("PropertyClassDescription"),
             "bc_property_description": data.get("PropertyDescription") or data.get("GeneralDescription"),
             "bc_sales_history": sales_history,

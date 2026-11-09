@@ -43,20 +43,24 @@ class DataTransformer:
                 return float(val)
 
         s = str(val).strip().replace(",", "")
+        # Remove currency symbol
+        s_clean = s.replace("$", "").strip()
+
+        # Handle numeric ranges first e.g. "1,200 - 1,400 sqft" or "1,200 - 1,400+ sqft"
+        range_match = re.search(r"(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)", s_clean)
+        if range_match:
+            n1 = float(range_match.group(1))
+            n2 = float(range_match.group(2))
+            return (n1 + n2) / 2.0
 
         # Handle plus expressions e.g. "3 + 1" bedrooms (3 main + 1 basement)
-        if "+" in s:
-            nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", s)]
+        if re.search(r"\d+(?:\.\d+)?\s*\+\s*\d+", s_clean):
+            nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", s_clean)]
             if nums:
                 return sum(nums)
 
-        # Handle numeric ranges e.g. "1,200 - 1,400 sqft"
-        if re.search(r"\d+\s*-\s*\d+", s):
-            nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", s)]
-            if len(nums) == 2:
-                return (nums[0] + nums[1]) / 2.0
-
-        match = re.search(r"\d+(?:\.\d+)?", s)
+        # Standard numeric extraction supporting optional negative sign (e.g. coordinates -123.128, negative values)
+        match = re.search(r"[-+]?\d+(?:\.\d+)?", s_clean)
         return float(match.group(0)) if match else None
 
     @staticmethod
@@ -65,22 +69,32 @@ class DataTransformer:
         return int(round(num)) if num is not None else None
 
     @staticmethod
-    def parse_address_parts(raw_address: str) -> Dict[str, Optional[str]]:
+    def parse_address_parts(raw_address: Optional[str]) -> Dict[str, Optional[str]]:
         """Parses address string into atomic unit, street number, street name, and postal code."""
+        if not raw_address:
+            return {
+                "unit_number": None,
+                "street_number": None,
+                "street_name": None,
+                "postal_code": None,
+                "full_address": "",
+            }
+
+        s_addr = str(raw_address).strip()
         parts: Dict[str, Optional[str]] = {
             "unit_number": None,
             "street_number": None,
             "street_name": None,
             "postal_code": None,
-            "full_address": raw_address.replace("|", ", ").strip(),
+            "full_address": s_addr.replace("|", ", ").strip(),
         }
 
         # Postal code regex (e.g. V6E 1C1 or V6E1C1)
-        pc_match = re.search(r"([A-Za-z]\d[A-Za-z]\s?\d[A-Za-z]\d)", raw_address)
+        pc_match = re.search(r"([A-Za-z]\d[A-Za-z]\s?\d[A-Za-z]\d)", s_addr)
         if pc_match:
             parts["postal_code"] = pc_match.group(1).upper().replace(" ", "")
 
-        street_part = raw_address.split("|")[0].strip() if "|" in raw_address else raw_address.split(",")[0].strip()
+        street_part = s_addr.split("|")[0].strip() if "|" in s_addr else s_addr.split(",")[0].strip()
 
         # Check for unit e.g. #301 - 1234 Main St or 301-1234 Main St
         unit_match = re.match(r"(?:#|APT|UNIT|SUITE)?\s*(\w+)\s*[-/]\s*(\d+)\s+(.+)", street_part, re.IGNORECASE)
@@ -106,6 +120,13 @@ class DataTransformer:
         else:
             parts["street_name"] = street_part
 
+        # Check for trailing unit e.g. "1234 Main St Apt 4B" or "1234 Main St #301"
+        if parts["street_name"] and not parts["unit_number"]:
+            trailing = re.search(r"[, ]\s*(?:APT|UNIT|SUITE|#)\s*([A-Za-z0-9]+)$", parts["street_name"], re.IGNORECASE)
+            if trailing:
+                parts["unit_number"] = trailing.group(1)
+                parts["street_name"] = parts["street_name"][:trailing.start()].strip()
+
         return parts
 
     @staticmethod
@@ -114,8 +135,8 @@ class DataTransformer:
         if not date_val:
             return None
 
-        # /Date(1710000000000)/
-        ms_match = re.search(r"/Date\((\d+)\)/", str(date_val))
+        # /Date(1710000000000)/ or /Date(1710000000000-0700)/
+        ms_match = re.search(r"/Date\((-?\d+)(?:[+-]\d{4})?\)/", str(date_val))
         if ms_match:
             ts = int(ms_match.group(1)) / 1000.0
             return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).strftime("%Y-%m-%d")
@@ -203,13 +224,19 @@ class DataTransformer:
             "sales_history_json": "[]",
         }
 
-        # Filter valid sales and sort by date descending
+        # Filter valid sales and sort by date descending with deduplication
         valid_sales = []
-        for s in sales:
+        seen = set()
+        for s in (sales or []):
+            if not isinstance(s, dict):
+                continue
             p = DataTransformer.parse_numeric(s.get("price") or s.get("SalePrice") or s.get("Price") or s.get("SoldPrice"))
             d = DataTransformer.parse_date(s.get("date") or s.get("SaleDate") or s.get("SoldDate") or s.get("Date"))
             if p is not None or d is not None:
-                valid_sales.append({"price": p, "date": d})
+                key = (d, p)
+                if key not in seen:
+                    seen.add(key)
+                    valid_sales.append({"price": p, "date": d})
 
         valid_sales.sort(key=lambda x: x["date"] or "", reverse=True)
         result["sales_history_json"] = json.dumps(valid_sales)
@@ -228,10 +255,11 @@ class DataTransformer:
         assessment: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Converts raw Realtor listing and assessment dict into complete atomic record."""
-        prop = listing.get("Property", {})
-        bldg = listing.get("Building", {})
-        land = listing.get("Land", {})
-        addr = prop.get("Address", {})
+        listing = listing or {}
+        prop = listing.get("Property") or {}
+        bldg = listing.get("Building") or {}
+        land = listing.get("Land") or {}
+        addr = prop.get("Address") or {}
         raw_addr = addr.get("AddressText", "")
         addr_parts = cls.parse_address_parts(raw_addr)
 
@@ -241,7 +269,10 @@ class DataTransformer:
             or listing.get("_queried_city")
             or "Vancouver"
         )
-        region = listing.get("_region", "Greater Vancouver")
+        # Default region resolution with Fraser Valley awareness
+        fraser_valley_cities = {"abbotsford", "mission", "chilliwack", "aldergrove", "hope", "kent", "harrison hot springs"}
+        default_region = "Fraser Valley" if city.strip().lower() in fraser_valley_cities else "Greater Vancouver"
+        region = listing.get("_region") or default_region
 
         # Geo Coordinates
         lat = cls.parse_numeric(prop.get("Latitude") or addr.get("Latitude"))
@@ -295,8 +326,15 @@ class DataTransformer:
 
         # Binary and categorical amenities
         desc = (listing.get("PublicRemarks") or "").lower()
-        has_pool = 1 if ("pool" in desc or bldg.get("PoolType")) else 0
-        has_fireplace = 1 if ("fireplace" in desc or bldg.get("FireplacePresent") == "True") else 0
+        pool_val = str(bldg.get("PoolType") or "").lower()
+        has_pool = 1 if ("pool" in desc or (pool_val and pool_val not in ("none", "false", "0", "no"))) else 0
+
+        fp_val = str(bldg.get("FireplacePresent") or "").lower()
+        has_fireplace = 1 if ("fireplace" in desc or fp_val in ("true", "1", "yes")) else 0
+
+        has_waterfront = 1 if ("waterfront" in desc or "ocean" in desc or "lake" in desc) else 0
+        has_garden = 1 if ("garden" in desc or "yard" in desc) else 0
+        has_balcony = 1 if ("balcony" in desc or "deck" in desc or "patio" in desc) else 0
         has_waterfront = 1 if ("waterfront" in desc or "ocean" in desc or "lake" in desc) else 0
         has_garden = 1 if ("garden" in desc or "yard" in desc) else 0
         has_balcony = 1 if ("balcony" in desc or "deck" in desc or "patio" in desc) else 0
@@ -363,7 +401,7 @@ class DataTransformer:
             "bc_land_value": assessment.get("bc_land_value") if assessment else None,
             "bc_improvement_value": assessment.get("bc_improvement_value") if assessment else None,
             "bc_previous_year_value": assessment.get("bc_previous_year_value") if assessment else None,
-            "bc_assessment_year": assessment.get("bc_assessment_year") if assessment else None,
+            "bc_assessment_year": cls.parse_int(assessment.get("bc_assessment_year")) if assessment else None,
             "bc_property_class": assessment.get("bc_property_class") if assessment else None,
             # Denormalized Sales History (last 3 sales)
             "sale_price_1": denorm_sales["sale_price_1"],

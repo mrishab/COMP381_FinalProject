@@ -72,10 +72,10 @@ class RealtorScraper:
         return None
 
     def parse_ms_date(self, date_str: Optional[str]) -> Optional[str]:
-        """Parses ASP.NET JSON dates like '/Date(1710000000000)/' or ISO strings."""
+        """Parses ASP.NET JSON dates like '/Date(1710000000000)/' or '/Date(1710000000000-0700)/' or ISO strings."""
         if not date_str:
             return None
-        match = re.search(r"/Date\((\d+)\)/", str(date_str))
+        match = re.search(r"/Date\((-?\d+)(?:[+-]\d{4})?\)/", str(date_str))
         if match:
             ts_ms = int(match.group(1))
             dt = datetime.datetime.fromtimestamp(ts_ms / 1000.0, tz=datetime.timezone.utc)
@@ -84,7 +84,9 @@ class RealtorScraper:
             dt = datetime.datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
             return dt.strftime("%Y-%m-%d")
         except Exception:
-            return str(date_str)[:10]
+            # Fallback for standard ISO prefix YYYY-MM-DD
+            m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", str(date_str))
+            return m.group(1) if m else str(date_str)[:10]
 
     def parse_price(self, price_str: Any) -> Optional[float]:
         """Cleans and extracts numeric price from currency string."""
@@ -168,14 +170,10 @@ class RealtorScraper:
                     headers=headers,
                 )
                 body = res.get("response", "")
-                if isinstance(body, str):
-                    try:
-                        data = json.loads(body)
-                    except json.JSONDecodeError:
-                        logger.warning(f"Non-JSON response for {city_name} page {page}")
-                        break
-                else:
-                    data = body
+                data = FlareSolverrClient.extract_json_response(body)
+                if not data or not isinstance(data, dict):
+                    logger.warning(f"Non-JSON response for {city_name} page {page}")
+                    break
 
                 results = data.get("Results", [])
                 if not results:
@@ -183,6 +181,7 @@ class RealtorScraper:
                     break
 
                 stop_early = False
+                consecutive_old = 0
                 for listing in results:
                     listing["_queried_city"] = city_name
                     listing["_region"] = config["region"]
@@ -192,7 +191,11 @@ class RealtorScraper:
                         date_str = (
                             listing.get("InsertedDateUTC")
                             or listing.get("DateListed")
+                            or listing.get("InsertedDate")
+                            or listing.get("ListingContractDate")
+                            or listing.get("LastUpdated")
                             or listing.get("Property", {}).get("InsertedDateUTC")
+                            or listing.get("Property", {}).get("DateListed")
                         )
                         parsed_d = self.parse_ms_date(date_str)
                         if parsed_d:
@@ -200,9 +203,14 @@ class RealtorScraper:
                                 dt = datetime.date.fromisoformat(parsed_d)
                                 today = datetime.datetime.now(datetime.timezone.utc).date()
                                 if (today - dt).days > max_days_old:
-                                    # Since results are sorted newest-first, we can stop
-                                    stop_early = True
-                                    break
+                                    consecutive_old += 1
+                                    # Skip this older listing; terminate only if 5 consecutive older listings seen
+                                    if consecutive_old >= 5:
+                                        stop_early = True
+                                        break
+                                    continue
+                                else:
+                                    consecutive_old = 0
                             except Exception:
                                 pass
 
@@ -213,7 +221,10 @@ class RealtorScraper:
                     break
 
                 paging = data.get("Paging", {})
-                total_pages = paging.get("TotalPages", 1)
+                try:
+                    total_pages = int(paging.get("TotalPages", 1))
+                except (ValueError, TypeError):
+                    total_pages = 1
                 if page >= total_pages:
                     break
 

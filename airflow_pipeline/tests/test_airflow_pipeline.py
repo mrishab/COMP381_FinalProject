@@ -126,6 +126,20 @@ class TestFlareSolverrClient:
         assert res["status_code"] == 200
         assert mock_get.call_count == 2
 
+    def test_flaresolverr_extract_json_html_wrapper(self):
+        # FlareSolverr / Chromium wrapping JSON in HTML <pre> or <body>
+        html_pre = '<html><head></head><body><pre style="word-wrap: break-word;">{"Results": [{"Id": "991"}]}</pre></body></html>'
+        data1 = FlareSolverrClient.extract_json_response(html_pre)
+        assert data1 == {"Results": [{"Id": "991"}]}
+
+        html_body = '<html><body>{"status": "ok", "value": 123}</body></html>'
+        data2 = FlareSolverrClient.extract_json_response(html_body)
+        assert data2 == {"status": "ok", "value": 123}
+
+        # Plain string JSON
+        data3 = FlareSolverrClient.extract_json_response('{"direct": true}')
+        assert data3 == {"direct": True}
+
 
 class TestRealtorScraper:
     """Tests for Realtor scraper regions, parsing, and pagination."""
@@ -170,7 +184,21 @@ class TestRealtorScraper:
         # ASP.NET ms timestamp: /Date(1710000000000)/ is 2024-03-09
         parsed = scraper.parse_ms_date("/Date(1710000000000)/")
         assert parsed == "2024-03-09"
+        # ASP.NET with timezone offset e.g. -0700 (Pacific Time)
+        assert scraper.parse_ms_date("/Date(1710000000000-0700)/") == "2024-03-09"
         assert scraper.parse_ms_date("2026-05-15T00:00:00Z") == "2026-05-15"
+
+    def test_realtor_scraper_paging_string_and_fresh_cutoff(self):
+        # Test that string TotalPages does not raise TypeError
+        mock_client = MagicMock()
+        mock_client.fetch.return_value = {
+            "status_code": 200,
+            "response": '{"Results": [{"Id": "1", "InsertedDateUTC": "2026-05-10T00:00:00Z"}], "Paging": {"TotalPages": "1"}}'
+        }
+        scraper = RealtorScraper(client=mock_client)
+        listings = list(scraper.fetch_city_listings("Vancouver", max_pages=1))
+        assert len(listings) == 1
+        assert listings[0]["Id"] == "1"
 
 
 class TestBCAssessmentScraper:
@@ -182,6 +210,9 @@ class TestBCAssessmentScraper:
         assert scraper.clean_address_query("1250 Robson St, Vancouver, BC") == "1250 Robson St Vancouver BC"
         # Test pipe delimiter replacement from Realtor.ca addresses
         assert scraper.clean_address_query("1250 Robson St|Vancouver, BC") == "1250 Robson St Vancouver BC"
+        # Test unit prefixes and postal code cleaning
+        assert scraper.clean_address_query("Unit 12B, 456 Elm Ave|Richmond, BC V6X 1A1") == "456 Elm Ave Richmond BC"
+        assert scraper.clean_address_query("Apt 402, 1100 Cambie St, Vancouver, BC") == "1100 Cambie St Vancouver BC"
 
     def test_parse_detailed_assessment(self):
         scraper = BCAssessmentScraper()
@@ -230,6 +261,24 @@ class TestDataTransformer:
         assert parts3["unit_number"] == "12B"
         assert parts3["street_number"] == "456"
         assert "Elm Ave" in parts3["street_name"]
+
+        # Trailing unit notations
+        addr4 = "1234 Main St Apt 4B, Vancouver, BC"
+        parts4 = DataTransformer.parse_address_parts(addr4)
+        assert parts4["unit_number"] == "4B"
+        assert parts4["street_number"] == "1234"
+        assert parts4["street_name"] == "Main St"
+
+        addr5 = "1234 Main St #301"
+        parts5 = DataTransformer.parse_address_parts(addr5)
+        assert parts5["unit_number"] == "301"
+        assert parts5["street_number"] == "1234"
+        assert parts5["street_name"] == "Main St"
+
+        # None input safe handling
+        parts_none = DataTransformer.parse_address_parts(None)
+        assert parts_none["full_address"] == ""
+        assert parts_none["unit_number"] is None
 
     def test_denormalize_sale_history_last_3_sales(self):
         sales = [
@@ -293,6 +342,8 @@ class TestDataTransformer:
         row = DataTransformer.transform_listing(raw_listing, assessment=assessment)
         assert row["mls_number"] == "R2891234"
         assert row["listing_price"] == 1250000.0
+        assert row["latitude"] == 49.2827
+        assert row["longitude"] == -123.1000
         assert row["unit_number"] == "101"
         assert row["street_number"] == "200"
         assert row["bedrooms"] == 2
@@ -317,6 +368,8 @@ class TestDataTransformer:
         # Textual date format: "15 Jan 2026" and "May 15, 2026"
         assert DataTransformer.parse_date("15 Jan 2026") == "2026-01-15"
         assert DataTransformer.parse_date("May 15, 2026") == "2026-05-15"
+        # ASP.NET date with timezone offset
+        assert DataTransformer.parse_date("/Date(1710000000000-0700)/") == "2024-03-09"
 
     def test_parse_numeric_ranges_and_plus_sums(self):
         # "3 + 1" bedrooms (3 main + 1 basement)
@@ -324,6 +377,47 @@ class TestDataTransformer:
         assert DataTransformer.parse_int("3 + 1") == 4
         # Range averaging: "1,200 - 1,400 sqft" -> 1300.0
         assert DataTransformer.parse_numeric("1,200 - 1,400 sqft") == 1300.0
+        # Range with plus suffix: "1,200 - 1,400+ sqft" -> 1300.0
+        assert DataTransformer.parse_numeric("1,200 - 1,400+ sqft") == 1300.0
+        # Suffix plus (e.g. 4+ bedrooms -> 4)
+        assert DataTransformer.parse_numeric("4+ beds") == 4.0
+        # Negative coordinates e.g. Canadian longitude
+        assert DataTransformer.parse_numeric("-123.128") == -123.128
+        # Negative currency
+        assert DataTransformer.parse_numeric("-$500") == -500.0
+
+    def test_denormalize_sale_history_deduplication(self):
+        # When same sale exists in both BC Assessment and Realtor.ca
+        bca_sales = [{"price": 1150000.0, "date": "2021-03-15"}, {"price": 950000.0, "date": "2017-06-20"}]
+        realtor_sales = [{"Price": "$1,150,000", "Date": "2021-03-15"}, {"Price": "$750,000", "Date": "2012-04-10"}]
+        denorm = DataTransformer.denormalize_sale_history(bca_sales + realtor_sales)
+        # Unique sales: 1150000 on 2021-03-15, 950000 on 2017-06-20, 750000 on 2012-04-10
+        assert denorm["sale_price_1"] == 1150000.0
+        assert denorm["sale_date_1"] == "2021-03-15"
+        assert denorm["sale_price_2"] == 950000.0
+        assert denorm["sale_date_2"] == "2017-06-20"
+        assert denorm["sale_price_3"] == 750000.0
+        assert denorm["sale_date_3"] == "2012-04-10"
+
+    def test_transform_listing_safe_null_subobjects_and_amenities(self):
+        # Gracefully handle when Property or Building is None
+        row_null = DataTransformer.transform_listing({"Property": None})
+        assert row_null["city"] == "Vancouver"
+        assert row_null["region"] == "Greater Vancouver"
+
+        # Test Fraser Valley city resolution when _region is missing
+        row_fv = DataTransformer.transform_listing({
+            "Property": {"Address": {"City": "Chilliwack"}}
+        })
+        assert row_fv["city"] == "Chilliwack"
+        assert row_fv["region"] == "Fraser Valley"
+
+        # Amenity parsing robustness
+        row_amenity = DataTransformer.transform_listing({
+            "Building": {"PoolType": "None", "FireplacePresent": True}
+        })
+        assert row_amenity["pool"] == 0
+        assert row_amenity["fireplace"] == 1
 
     def test_mls_number_collision_prevention(self):
         listing1 = {"Property": {"Address": {"AddressText": "100 A St"}, "Price": 500000}}
@@ -405,6 +499,7 @@ class TestAirflowDAGStructure:
         assert dag.schedule_interval == "@daily"
         assert dag.catchup is False
         assert dag.max_active_runs == 1
+        assert dag.max_active_tasks == 4
 
     def test_dag_task_graph_dependencies(self):
         # init_storage is upstream of city tasks
@@ -414,6 +509,9 @@ class TestAirflowDAGStructure:
 
         assert len(init_task.downstream_list) >= 15
         assert summary_task in export_task.downstream_list
+        # Fan-in tasks use all_done so single city failure does not abort CSV export or summary report
+        assert getattr(export_task, "trigger_rule", None) in ("all_done", "ALL_DONE")
+        assert getattr(summary_task, "trigger_rule", None) in ("all_done", "ALL_DONE")
 
     def test_task_init_storage_and_summary_callables(self):
         with tempfile.NamedTemporaryFile(suffix=".db") as tmp_db:

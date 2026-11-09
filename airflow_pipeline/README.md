@@ -7,9 +7,10 @@ Daily Apache Airflow DAG orchestrated data ingestion pipeline covering all munic
 - **Airflow 2.11.2**: Webserver, Scheduler, Setup, and Postgres metadata store. Configured with `LocalExecutor` for parallel task scheduling with health check dependencies.
 - **FlareSolverr v3.5.2 Proxy**: Dockerized proxy that resolves Cloudflare turnstile and anti-bot challenges.
 - **Rate Limiter & Backoff**: Randomized jitter delay (`2.0s ± 1.0s`) and exponential backoff (`3.0 * 2^attempt`) on HTTP 429, 500, 502, and 503.
-- **Atomic Data Model**: Normalizes addresses, dates, unit specifications, utilities, and tax values into single-attribute columns.
-- **Denormalized Sales History**: Captures the last 3 historical sale transactions (`sale_price_1`, `sale_date_1`, `sale_price_2`, `sale_date_2`, `sale_price_3`, `sale_date_3`), plus full overflow JSON.
+- **Atomic Data Model**: Normalizes addresses, dates, unit specifications, utilities, and tax values into single-attribute columns with support for negative coordinates, complex unit formats, and safe sub-object fallbacks.
+- **Denormalized Sales History**: Captures the last 3 historical sale transactions (`sale_price_1`, `sale_date_1`, `sale_price_2`, `sale_date_2`, `sale_price_3`, `sale_date_3`) with transaction deduplication across both Realtor and BC Assessment feeds, plus full overflow JSON.
 - **Dual Storage**: ACID SQLite database (`real_estate.db`) with WAL mode (`PRAGMA journal_mode=WAL`), busy timeouts, and indexes (`mls_number`, `city`, `region`, `listing_price`, `date_listed`), plus automatic daily CSV export (`real_estate_listings.csv`).
+- **Resilient Airflow DAG**: Uses `LocalExecutor` with `max_active_tasks=4` to balance FlareSolverr browser throughput, `all_done` trigger rules for fan-in export/summary tasks, and `MAX_DAYS_OLD` cutoff for daily fresh inventory ingestion.
 
 ## Geographic Coverage
 
@@ -43,7 +44,7 @@ airflow_pipeline/
 │       ├── data_transformer.py     # Schema normalizer and 3-sale denormalizer
 │       └── db_storage.py           # SQLite upsert, WAL mode, lock retry, and CSV export
 └── tests/
-    └── test_airflow_pipeline.py    # 23 comprehensive unit and integration tests
+    └── test_airflow_pipeline.py    # 27 comprehensive unit and integration tests
 ```
 
 ## Running with Docker Compose

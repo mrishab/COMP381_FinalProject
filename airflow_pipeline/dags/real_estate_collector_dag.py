@@ -21,7 +21,10 @@ for p in (CURRENT_DIR, PARENT_DIR):
 try:
     from airflow import DAG
     from airflow.operators.python import PythonOperator
+    from airflow.utils.trigger_rule import TriggerRule
+    ALL_DONE = TriggerRule.ALL_DONE
 except ImportError:
+    ALL_DONE = "all_done"
     # Graceful fallback for non-Airflow test environments
     class DAG:  # type: ignore
         _current_dag: Optional["DAG"] = None
@@ -30,8 +33,10 @@ except ImportError:
             self.kwargs = kwargs
             self.tasks: List[Any] = []
             self.schedule_interval = kwargs.get("schedule") or kwargs.get("schedule_interval")
+            self.schedule = self.schedule_interval
             self.catchup = kwargs.get("catchup", True)
             self.max_active_runs = kwargs.get("max_active_runs", 16)
+            self.max_active_tasks = kwargs.get("max_active_tasks", kwargs.get("concurrency", 16))
             self.tags = kwargs.get("tags", [])
         def __enter__(self) -> "DAG":
             DAG._current_dag = self
@@ -44,6 +49,7 @@ except ImportError:
             self.task_id = task_id
             self.python_callable = python_callable
             self.op_kwargs = op_kwargs or {}
+            self.trigger_rule = kwargs.get("trigger_rule", "all_success")
             self.downstream_list: List["PythonOperator"] = []
             self.upstream_list: List["PythonOperator"] = []
             if DAG._current_dag is not None:
@@ -78,6 +84,7 @@ FLARESOLVERR_URL = os.getenv("FLARESOLVERR_URL", "http://flaresolverr:8191/v1")
 RATE_LIMIT_DELAY = float(os.getenv("RATE_LIMIT_DELAY_SECONDS", "2.0"))
 MAX_RETRIES = int(os.getenv("MAX_BACKOFF_RETRIES", "5"))
 DEFAULT_MAX_PAGES = int(os.getenv("MAX_PAGES_PER_CITY", "5"))
+DEFAULT_MAX_DAYS_OLD = int(os.getenv("MAX_DAYS_OLD", "1")) if os.getenv("MAX_DAYS_OLD") else None
 
 default_args = {
     "owner": "real_estate_pipeline",
@@ -97,9 +104,16 @@ def task_init_storage(**kwargs: Any) -> Dict[str, Any]:
     return {"status": "initialized", "db_path": SQLITE_PATH}
 
 
-def task_collect_and_enrich_city(city_name: str, max_pages: int = 5, **kwargs: Any) -> Dict[str, Any]:
+def task_collect_and_enrich_city(
+    city_name: str,
+    max_pages: int = 5,
+    max_days_old: Optional[int] = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
     """Collects listings for a specific city, enriches with BC Assessment, and upserts."""
-    logger.info(f"Starting daily fresh inventory collection for municipality: {city_name}")
+    if max_days_old is None:
+        max_days_old = DEFAULT_MAX_DAYS_OLD
+    logger.info(f"Starting daily fresh inventory collection for municipality: {city_name} (max_days_old={max_days_old})")
 
     client = FlareSolverrClient(
         flaresolverr_url=FLARESOLVERR_URL,
@@ -113,7 +127,7 @@ def task_collect_and_enrich_city(city_name: str, max_pages: int = 5, **kwargs: A
     transformed_records = []
     scraped_count = 0
 
-    for raw_listing in realtor.fetch_city_listings(city_name, max_pages=max_pages):
+    for raw_listing in realtor.fetch_city_listings(city_name, max_pages=max_pages, max_days_old=max_days_old):
         scraped_count += 1
         addr_text = (
             raw_listing.get("Property", {}).get("Address", {}).get("AddressText", "")
@@ -176,6 +190,7 @@ with DAG(
     schedule="@daily",
     catchup=False,
     max_active_runs=1,
+    max_active_tasks=4,
     tags=["real_estate", "gva", "fraser_valley", "realtor", "bcassessment"],
 ) as dag:
 
@@ -216,7 +231,11 @@ with DAG(
         city_task = PythonOperator(
             task_id=f"collect_{safe_city_id}",
             python_callable=task_collect_and_enrich_city,
-            op_kwargs={"city_name": city, "max_pages": DEFAULT_MAX_PAGES},
+            op_kwargs={
+                "city_name": city,
+                "max_pages": DEFAULT_MAX_PAGES,
+                "max_days_old": DEFAULT_MAX_DAYS_OLD,
+            },
         )
         init_storage >> city_task
         city_tasks.append(city_task)
@@ -224,11 +243,13 @@ with DAG(
     export_csv = PythonOperator(
         task_id="export_csv_dataset",
         python_callable=task_export_csv,
+        trigger_rule=ALL_DONE,
     )
 
     pipeline_summary = PythonOperator(
         task_id="pipeline_summary_report",
         python_callable=task_pipeline_summary,
+        trigger_rule=ALL_DONE,
     )
 
     for ct in city_tasks:

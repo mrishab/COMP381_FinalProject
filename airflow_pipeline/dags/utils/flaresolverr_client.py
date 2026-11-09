@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import random
+import re
 import time
 import urllib.parse
 from typing import Any, Dict, Optional
@@ -66,6 +67,45 @@ class FlareSolverrClient:
             time.sleep(sleep_time)
 
         self.last_request_time = time.time()
+
+    @staticmethod
+    def extract_json_response(raw: Any) -> Any:
+        """Parses JSON from raw string with fallback extraction for HTML-wrapped JSON (e.g. from FlareSolverr/Chromium)."""
+        if not raw:
+            return None
+        if isinstance(raw, (dict, list)):
+            return raw
+        s = str(raw).strip()
+        try:
+            return json.loads(s)
+        except Exception:
+            pass
+
+        # Check <pre> tag e.g. <pre style="...">{"Results": [...]}</pre>
+        pre_match = re.search(r"<pre[^>]*>(.*?)</pre>", s, re.DOTALL | re.IGNORECASE)
+        if pre_match:
+            try:
+                return json.loads(pre_match.group(1).strip())
+            except Exception:
+                pass
+
+        # Check <body> tag
+        body_match = re.search(r"<body[^>]*>(.*?)</body>", s, re.DOTALL | re.IGNORECASE)
+        if body_match:
+            try:
+                return json.loads(body_match.group(1).strip())
+            except Exception:
+                pass
+
+        # Check outermost JSON object or array
+        json_match = re.search(r"(\{.*\}|\[.*\])", s, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group(1).strip())
+            except Exception:
+                pass
+
+        return None
 
     def is_flaresolverr_available(self) -> bool:
         """Checks if the FlareSolverr service is reachable."""

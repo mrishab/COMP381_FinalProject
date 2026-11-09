@@ -57,6 +57,7 @@ services:
     entrypoint: []
     command: >
       bash -c '
+        mkdir -p /opt/airflow/logs /opt/airflow/data /opt/airflow/plugins &&
         (airflow db migrate || airflow db upgrade) &&
         (airflow users create --username "${AIRFLOW_ADMIN_USER:-admin}" --firstname "${AIRFLOW_ADMIN_FIRSTNAME:-Admin}" --lastname "${AIRFLOW_ADMIN_LASTNAME:-User}" --role "${AIRFLOW_ADMIN_ROLE:-Admin}" --email "${AIRFLOW_ADMIN_EMAIL:-admin@example.com}" --password "${AIRFLOW_ADMIN_PASS:-admin}" || true)
       '
@@ -93,6 +94,12 @@ services:
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
       FLARESOLVERR_URL: ${FLARESOLVERR_URL:-http://flaresolverr:8191/v1}
+      PREFER_FLARESOLVERR: ${PREFER_FLARESOLVERR:-true}
+      RATE_LIMIT_DELAY_SECONDS: ${RATE_LIMIT_DELAY_SECONDS:-2.0}
+      MAX_BACKOFF_RETRIES: ${MAX_BACKOFF_RETRIES:-5}
+      MAX_PAGES_PER_CITY: ${MAX_PAGES_PER_CITY:-5}
+      MAX_DAYS_OLD: ${MAX_DAYS_OLD:-1}
+      CITIES_TO_SCRAPE: ${CITIES_TO_SCRAPE:-}
       SQLITE_DB_PATH: ${SQLITE_DB_PATH:-/opt/airflow/data/real_estate.db}
       CSV_OUTPUT_PATH: ${CSV_OUTPUT_PATH:-/opt/airflow/data/real_estate_listings.csv}
       _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
@@ -122,6 +129,12 @@ services:
       AIRFLOW__CORE__EXECUTOR: ${AIRFLOW_CORE_EXECUTOR:-LocalExecutor}
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       FLARESOLVERR_URL: ${FLARESOLVERR_URL:-http://flaresolverr:8191/v1}
+      PREFER_FLARESOLVERR: ${PREFER_FLARESOLVERR:-true}
+      RATE_LIMIT_DELAY_SECONDS: ${RATE_LIMIT_DELAY_SECONDS:-2.0}
+      MAX_BACKOFF_RETRIES: ${MAX_BACKOFF_RETRIES:-5}
+      MAX_PAGES_PER_CITY: ${MAX_PAGES_PER_CITY:-5}
+      MAX_DAYS_OLD: ${MAX_DAYS_OLD:-1}
+      CITIES_TO_SCRAPE: ${CITIES_TO_SCRAPE:-}
       SQLITE_DB_PATH: ${SQLITE_DB_PATH:-/opt/airflow/data/real_estate.db}
       CSV_OUTPUT_PATH: ${CSV_OUTPUT_PATH:-/opt/airflow/data/real_estate_listings.csv}
       _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
@@ -138,7 +151,7 @@ services:
       airflow_setup:
         condition: service_completed_successfully
       flaresolverr:
-        condition: service_started
+        condition: service_healthy
 
 volumes:
   pg_data:
